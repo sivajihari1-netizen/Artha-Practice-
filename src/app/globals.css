@@ -1,0 +1,223 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --ink: #1a1a1a;
+  --accent: #0f4d3a;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   MARKETING HOMEPAGE (src/app/page.tsx + src/components/marketing/*) ONLY
+   ══════════════════════════════════════════════════════════════════════
+   Ported from a Lovable/TanStack Start reference build (Tailwind v4
+   CSS-first tokens) into this Tailwind v3 project. Every token below is
+   prefixed --mkt- specifically so it can never collide with --ink/--accent
+   above or with any future addition elsewhere in the app — consumed only
+   via the mkt-* color names in tailwind.config.ts, applied only inside
+   src/components/marketing/*. Dark is the ONLY mode here (the marketing
+   page has no light/dark toggle) — the dashboard's light-paper theme is
+   completely untouched and does not read any of these variables.
+
+   Two greens, two jobs (kept from the source design, and deliberately not
+   collapsed into one): --mkt-brand-mid is a FILL colour (buttons, badges —
+   white text on it clears 8:1+); --mkt-primary is a bright mint used only
+   as a MARK (text, icons, borders, active states) since the deep brand
+   green as text-on-near-black would be ~2:1, unreadable.
+   ══════════════════════════════════════════════════════════════════════ */
+:root {
+  --mkt-brand-deep: oklch(0.28 0.055 168);
+  --mkt-brand: oklch(0.376 0.069 167); /* Artha's #0f4d3a, same hue as --accent above */
+  --mkt-brand-mid: oklch(0.462 0.088 165);
+  --mkt-brand-lift: oklch(0.548 0.108 161);
+  --mkt-on-brand: oklch(0.985 0.008 165);
+
+  --mkt-bg: oklch(0.155 0.011 168);
+  --mkt-fg: oklch(0.964 0.006 162);
+  --mkt-fg-2: oklch(0.845 0.011 162);
+  --mkt-card: oklch(0.191 0.01 166);
+
+  --mkt-primary: oklch(0.752 0.19 150.5);
+  --mkt-primary-fg: oklch(0.16 0.04 155);
+
+  --mkt-muted-fg: oklch(0.674 0.014 162);
+  --mkt-destructive: oklch(0.637 0.198 25.3);
+  --mkt-warn: oklch(0.775 0.152 76.5);
+  --mkt-info: oklch(0.72 0.122 253);
+
+  --mkt-border: oklch(0.256 0.013 166);
+  --mkt-ring: oklch(0.752 0.19 150.5);
+
+  --mkt-surface: oklch(0.191 0.01 166);
+  --mkt-surface-2: oklch(0.221 0.011 166);
+  --mkt-surface-3: oklch(0.256 0.013 166);
+  --mkt-border-hi: oklch(0.315 0.015 166);
+
+  --mkt-wash: color-mix(in oklab, var(--mkt-primary) 8%, transparent);
+  --mkt-wash-hi: color-mix(in oklab, var(--mkt-primary) 16%, transparent);
+  --mkt-danger-wash: color-mix(in oklab, var(--mkt-destructive) 13%, transparent);
+  --mkt-warn-wash: color-mix(in oklab, var(--mkt-warn) 13%, transparent);
+  --mkt-info-wash: color-mix(in oklab, var(--mkt-info) 13%, transparent);
+  --mkt-glow: color-mix(in oklab, var(--mkt-brand-mid) 26%, transparent);
+
+  --mkt-shadow-elegant: 0 26px 74px -22px rgb(0 0 0 / 0.8);
+  --mkt-shadow-sm-elegant: 0 10px 26px -12px rgb(0 0 0 / 0.6);
+
+  --mkt-rhythm: 72px;
+  --mkt-rhythm-sm: 52px;
+}
+
+@keyframes mkt-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes mkt-marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+@keyframes mkt-pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--mkt-primary) 45%, transparent);
+  }
+  70% {
+    box-shadow: 0 0 0 9px transparent;
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+@keyframes mkt-sheen {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(220%);
+  }
+}
+
+.mkt-num {
+  font-variant-numeric: tabular-nums;
+}
+.mkt-label-eyebrow {
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+.mkt-fade-up {
+  animation: mkt-fade-up 0.5s cubic-bezier(0.2, 0.7, 0.3, 1) both;
+}
+.mkt-grid-bg {
+  background-image:
+    linear-gradient(to right, color-mix(in oklab, var(--mkt-fg) 4%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in oklab, var(--mkt-fg) 4%, transparent) 1px, transparent 1px);
+  background-size: 56px 56px;
+  mask-image: radial-gradient(ellipse 90% 60% at 50% 0%, #000 20%, transparent 80%);
+}
+.mkt-aura {
+  position: relative;
+}
+.mkt-aura::before {
+  content: "";
+  position: absolute;
+  inset: -30% -10% auto -10%;
+  height: 340px;
+  background: radial-gradient(ellipse at 50% 0%, color-mix(in oklab, var(--mkt-brand-mid) 30%, transparent), transparent 70%);
+  pointer-events: none;
+  filter: blur(10px);
+}
+.mkt-spotlight {
+  position: relative;
+  isolation: isolate;
+}
+.mkt-spotlight::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  opacity: 0;
+  transition: opacity 0.35s ease;
+  background: radial-gradient(260px circle at var(--mkt-mx, 50%) var(--mkt-my, 50%), color-mix(in oklab, var(--mkt-brand-mid) 22%, transparent), transparent 70%);
+  pointer-events: none;
+  z-index: -1;
+}
+.mkt-spotlight:hover::after {
+  opacity: 1;
+}
+.mkt-marquee-track {
+  animation: mkt-marquee 42s linear infinite;
+  width: max-content;
+}
+.mkt-edge-fade {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 15%, #000 85%, transparent);
+  mask-image: linear-gradient(to right, transparent, #000 15%, #000 85%, transparent);
+}
+.mkt-pulse-ring {
+  animation: mkt-pulse-ring 2.2s ease-out infinite;
+}
+.mkt-sheen {
+  animation: mkt-sheen 3.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mkt-marquee-track,
+  .mkt-sheen,
+  .mkt-pulse-ring,
+  .mkt-fade-up {
+    animation: none !important;
+  }
+  .mkt-marquee-track {
+    transform: none !important;
+  }
+}
+
+/* ---- Focus visibility + skip link (scoped to .mkt-page, never global) ---- */
+.mkt-page :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+  outline: 2px solid var(--mkt-ring);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+
+.mkt-skip-link {
+  position: fixed;
+  top: 0.5rem;
+  left: 0.5rem;
+  z-index: 200;
+  transform: translateY(-200%);
+  border-radius: 0.5rem;
+  background: var(--mkt-primary);
+  color: var(--mkt-on-brand);
+  padding: 0.6rem 1rem;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.mkt-skip-link:focus {
+  transform: translateY(0);
+}
+/* ══════════════════════════ END MARKETING HOMEPAGE ══════════════════════════ */
+
+body {
+  background: #faf8f4;
+  color: var(--ink);
+}
+
+@media print {
+  @page {
+    size: A4;
+    margin: 12mm;
+  }
+  body {
+    background: #ffffff;
+  }
+}

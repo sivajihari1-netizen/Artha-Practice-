@@ -1,0 +1,1066 @@
+// Artha — CA Practice Management Platform
+// Prisma schema covering firms (tenants), staff, clients, tasks, documents,
+// compliance tracking, notifications and billing.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Tenancy & Auth ----------
+
+model Firm {
+  id        String   @id @default(cuid())
+  name      String
+  city      String?
+  gstin     String?  // firm's own GSTIN — needed to raise GST-compliant client invoices
+  pan       String?
+  address   String?
+  bankName        String?
+  bankAccountName String?
+  bankAccountNo   String?
+  bankIfsc        String?
+  upiId           String?
+  phone           String?
+  email           String?
+  website         String?
+  showCaTagline   Boolean  @default(true) // show "Chartered Accountants" under the firm name on invoices
+  brandColor      String   @default("#0F766E") // one brand color used across invoices AND quotations
+  // Bring-your-own Razorpay account for collecting online invoice payments —
+  // funds settle directly to the firm's own bank account via their own
+  // Razorpay account. Artha never holds or touches client payments.
+  razorpayKeyId             String?
+  razorpayKeySecretEnc      String? // AES-256-GCM, see src/lib/crypto.ts
+  razorpayWebhookSecretEnc  String?
+  planId    String?
+  plan      Plan?    @relation(fields: [planId], references: [id])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users        User[]
+  clients      Client[]
+  tasks        Task[]
+  taskStatusOptions TaskStatusOption[]
+  taskCategoryOptions TaskCategoryOption[]
+  taskTemplates TaskTemplate[]
+  documents    Document[]
+  leads        Lead[]
+  subscription Subscription?
+  documentRequests DocumentRequest[]
+  invoices     Invoice[]
+  quotations   Quotation[]
+  auditLogs    AuditLog[]
+  agentActions AgentAction[]
+  reconciliationRuns ReconciliationRun[]
+  activities   Activity[]
+}
+
+model TaskStatusOption {
+  id          String   @id @default(cuid())
+  firmId      String
+  firm        Firm     @relation(fields: [firmId], references: [id])
+  name        String
+  key         String
+  systemKey   String?
+  description String?
+  color       String?
+  sortOrder   Int      @default(0)
+  isActive    Boolean  @default(true)
+  isDefault   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tasks       Task[]   @relation("TaskStatusOption")
+
+  @@unique([firmId, key])
+  @@index([firmId, sortOrder])
+}
+
+model TaskCategoryOption {
+  id          String   @id @default(cuid())
+  firmId      String
+  firm        Firm     @relation(fields: [firmId], references: [id])
+  name        String
+  key         String
+  systemKey   String?
+  description String?
+  color       String?
+  sortOrder   Int      @default(0)
+  isActive    Boolean  @default(true)
+  isDefault   Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  tasks       Task[]   @relation("TaskCategoryOption")
+
+  @@unique([firmId, key])
+  @@index([firmId, sortOrder])
+}
+
+enum Role {
+  PARTNER
+  MANAGER
+  STAFF
+}
+
+model User {
+  id           String   @id @default(cuid())
+  firmId       String
+  firm         Firm     @relation(fields: [firmId], references: [id])
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         Role     @default(STAFF)
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  assignedTasks   Task[]        @relation("TaskAssignee")
+  createdTasks    Task[]        @relation("TaskCreator")
+  attendanceLogs  AttendanceLog[]
+  leaveRequests   LeaveRequest[]
+  timeLogs        TimeLog[]
+  gstReconciliations GstReconciliation[]
+  documentRequests   DocumentRequest[]
+  invoices           Invoice[]
+  quotations         Quotation[]
+  auditLogs          AuditLog[]
+  uploadedDocuments  Document[]
+  passwordResetTokens PasswordResetToken[]
+  reviewedAgentActions AgentAction[]
+  createdReconciliationRuns ReconciliationRun[]
+  resolvedReconciliationMatches ReconciliationMatch[]
+  activities                Activity[]
+}
+
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token     String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+// ---------- Clients / CRM ----------
+
+enum ClientType {
+  INDIVIDUAL
+  PROPRIETORSHIP
+  PARTNERSHIP
+  LLP
+  COMPANY
+  TRUST
+  OTHER
+}
+
+model Client {
+  id        String     @id @default(cuid())
+  firmId    String
+  firm      Firm       @relation(fields: [firmId], references: [id])
+  name      String
+  type      ClientType @default(INDIVIDUAL)
+  pan       String?
+  gstin     String?    // kept as the single "primary" GSTIN used by invoice GST-type logic — ClientGstin below is the full multi-registration list
+  turnover  Float?     // annual turnover in INR — informational for now, not yet consumed by any ComplianceRule condition
+  active    Boolean    @default(true)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  contacts    ContactPerson[]
+  credentials Credential[]
+  tasks       Task[]
+  documents   Document[]
+  dscRecords  DscRecord[]
+  gstReconciliations GstReconciliation[]
+  documentRequests   DocumentRequest[]
+  invoices    Invoice[]
+  quotations  Quotation[]
+  gstins      ClientGstin[]
+  agentActions AgentAction[]
+  reconciliationRuns ReconciliationRun[]
+  reconciliationColumnMappings ReconciliationColumnMapping[]
+  convertedFromLeads Lead[]
+  notificationLogs   NotificationLog[]
+}
+
+// ---------- AI Agents ----------
+// Proposals from the automated agents in src/lib/agents.ts. Tier 1 actions
+// execute immediately (recorded here for audit); Tier 2/3 land as
+// "pending_review" for a Partner/Manager to approve or reject in the Agent
+// Review Queue (src/app/dashboard/agent-review).
+
+enum AgentActionStatus {
+  executed
+  pending_review
+  rejected
+}
+
+model AgentAction {
+  id             String            @id @default(cuid())
+  firmId         String
+  firm           Firm              @relation(fields: [firmId], references: [id])
+  agentType      String            // e.g. "document_chase", "reconciliation"
+  tier           Int               // 1 = auto-execute, 2/3 = human review
+  clientId       String
+  client         Client            @relation(fields: [clientId], references: [id])
+  inputContext   Json              // whatever context the agent based its decision on — for audit
+  proposedAction String
+  status         AgentActionStatus @default(pending_review)
+  reviewedById   String?
+  reviewedBy     User?             @relation(fields: [reviewedById], references: [id])
+  reviewedAt     DateTime?
+  createdAt      DateTime          @default(now())
+
+  @@index([firmId, status])
+}
+
+// A client can hold multiple GST registrations (one per state of operation).
+// Additive alongside Client.gstin — see comment above.
+model ClientGstin {
+  id        String   @id @default(cuid())
+  clientId  String
+  client    Client   @relation(fields: [clientId], references: [id])
+  gstin     String
+  state     String   // derived from the GSTIN's state code at creation time, see src/lib/gstin.ts
+  qrmpOpted Boolean  @default(false)
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  tasks Task[]
+
+  @@unique([clientId, gstin])
+}
+
+model ContactPerson {
+  id       String  @id @default(cuid())
+  clientId String
+  client   Client  @relation(fields: [clientId], references: [id])
+  name     String
+  designation String?
+  phone    String?
+  email    String?
+  isPrimary Boolean @default(false)
+}
+
+// Credentials are stored encrypted at the application layer (see src/lib/crypto.ts).
+// `secretEnc` holds the AES-256-GCM ciphertext; never store plaintext here.
+model Credential {
+  id        String   @id @default(cuid())
+  clientId  String
+  client    Client   @relation(fields: [clientId], references: [id])
+  label     String   // e.g. "GST Portal", "Income Tax Portal", "MCA"
+  username  String?
+  secretEnc String   // encrypted password/secret
+  expiresAt DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+enum LeadStage {
+  NEW
+  CONTACTED
+  PROPOSAL_SENT
+  WON
+  LOST
+}
+
+model Lead {
+  id        String    @id @default(cuid())
+  firmId    String
+  firm      Firm      @relation(fields: [firmId], references: [id])
+  name      String
+  phone     String?
+  email     String?
+  stage     LeadStage @default(NEW)
+  notes     String?
+  // Set once a WON lead is onboarded as a Client, so lead-source reporting
+  // ("which clients came from which lead") is a real join, not a UI guess.
+  // Nullable/unenforced on purpose — not every Client originates from a Lead.
+  convertedClientId String?
+  convertedClient   Client?  @relation(fields: [convertedClientId], references: [id])
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+}
+
+// ---------- Tasks / Compliance ----------
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  REVIEW
+  DONE
+}
+
+// A human judgment call, deliberately separate from dueDate (the objective
+// compliance deadline) — see the Task module audit's Priority section for
+// why urgency/risk/SLA/client-importance stay derived concepts instead of
+// stored fields here.
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum ReturnType {
+  GST
+  TDS
+  ITR
+  ROC
+  AUDIT
+  OTHER
+}
+
+// ---------- Compliance Rule Engine ----------
+// Global, platform-managed statutory filing rules (GSTR-1/3B, ITR, ROC, ...) —
+// deliberately NOT firm-scoped, since these are government-mandated facts
+// identical for every CA firm, not firm-configurable business logic. See
+// scripts/seed-compliance-rules.mjs for the seeded rule set and its caveats.
+model ComplianceRule {
+  id          String     @id @default(cuid())
+  ruleCode    String     @unique // e.g. "GSTR3B_MONTHLY"
+  title       String
+  description String?
+  returnType  ReturnType
+  recurrence  String     // same format as TaskTemplate.recurrence: "MONTHLY" | "QUARTERLY" | "ANNUAL:MM-DD"
+  appliesToGstin      Boolean  @default(false) // true = one task per active ClientGstin; false = one task per client
+  conditions          Json     // structured applicability, e.g. { entityTypes: ["COMPANY"], requiresGstin: true, qrmpOnly: true }
+  dueDateOffsetDays   Int?     // for MONTHLY/QUARTERLY: which day of the month-after the return is due
+  overrideDueDate         DateTime? // set once by an admin when govt extends a deadline
+  overrideAppliesToPeriod String?   // the specific periodKey the override targets, e.g. "2026-07"
+  active      Boolean    @default(true)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  tasks Task[]
+}
+
+model TaskTemplate {
+  id          String     @id @default(cuid())
+  firmId      String
+  firm        Firm       @relation(fields: [firmId], references: [id])
+  title       String
+  returnType  ReturnType @default(OTHER)
+  recurrence  String     // cron-like or simple "MONTHLY"/"QUARTERLY"/"ANNUAL"
+  checklist   Json?      // array of checklist item strings
+  active      Boolean    @default(true)
+  createdAt   DateTime   @default(now())
+
+  generatedTasks Task[]
+}
+
+model Task {
+  id                String     @id @default(cuid())
+  firmId            String
+  firm              Firm       @relation(fields: [firmId], references: [id])
+  clientId          String?
+  client            Client?    @relation(fields: [clientId], references: [id])
+  title             String
+  description       String?
+  returnType        ReturnType @default(OTHER)
+  status            TaskStatus @default(TODO)
+  priority          TaskPriority?
+  statusOptionId    String?
+  statusOption      TaskStatusOption? @relation("TaskStatusOption", fields: [statusOptionId], references: [id])
+  categoryOptionId  String?
+  categoryOption    TaskCategoryOption? @relation("TaskCategoryOption", fields: [categoryOptionId], references: [id])
+  dueDate           DateTime?
+  assigneeId        String?
+  assignee          User?      @relation("TaskAssignee", fields: [assigneeId], references: [id])
+  createdById       String?
+  createdBy         User?      @relation("TaskCreator", fields: [createdById], references: [id])
+  checklist         Json?
+  sourceTemplateId  String?
+  sourceTemplate    TaskTemplate? @relation(fields: [sourceTemplateId], references: [id])
+  complianceRuleId  String?
+  complianceRule    ComplianceRule? @relation(fields: [complianceRuleId], references: [id])
+  clientGstinId     String?    // informational link to which GSTIN this task is for, when complianceRule.appliesToGstin — not part of the uniqueness key (see periodKey)
+  clientGstin       ClientGstin? @relation(fields: [clientGstinId], references: [id])
+  periodKey         String?    // e.g. "2026-07" (monthly) / "2026-Q2" (quarterly) — dedupes recurring generation. For per-GSTIN compliance-rule tasks, the GSTIN is embedded as "2026-07:29ABCDE1234F1Z5"
+  lastReminderSentAt DateTime? // dedupes client due-date reminders across cron runs
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+
+  timeLogs TimeLog[]
+  reconciliationMatches ReconciliationMatch[]
+  triggeredNotifications NotificationLog[]
+  documents Document[]
+  documentRequests DocumentRequest[]
+
+  @@unique([sourceTemplateId, clientId, periodKey])
+  @@unique([complianceRuleId, clientId, periodKey])
+}
+
+model TimeLog {
+  id        String   @id @default(cuid())
+  taskId    String
+  task      Task     @relation(fields: [taskId], references: [id])
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  minutes   Int
+  billable  Boolean  @default(true)
+  loggedAt  DateTime @default(now())
+  note      String?
+}
+
+// ---------- DSC & Expiry Tracking ----------
+
+model DscRecord {
+  id         String    @id @default(cuid())
+  clientId   String
+  client     Client    @relation(fields: [clientId], references: [id])
+  holderName String
+  serialNo   String?
+  issuedAt   DateTime?
+  expiresAt  DateTime
+  location   String?   // physical/custody location
+  createdAt  DateTime  @default(now())
+}
+
+// ---------- Documents ----------
+
+enum DocumentStatus {
+  ACTIVE
+  SUPERSEDED
+  DELETED
+}
+
+// Only the two upload channels that actually exist in this app — clients
+// can't upload via the portal today, only view, so there's no WEB_PORTAL value.
+enum DocumentSourceChannel {
+  STAFF_MANUAL_UPLOAD
+  WHATSAPP_LINK
+}
+
+model Document {
+  id         String   @id @default(cuid())
+  firmId     String
+  firm       Firm     @relation(fields: [firmId], references: [id])
+  clientId   String?
+  client     Client?  @relation(fields: [clientId], references: [id])
+  category   String   // e.g. "Income Proof", "GST Docs", "ITR", "Bank Statement"
+  workType   ReturnType? // "work wise" folder — which compliance area this belongs to
+  periodYear  Int?     // "year wise" folder, e.g. 2026
+  periodMonth Int?     // "month wise" folder, 1-12; null for evergreen/non-periodic documents
+  fileName   String
+  storageKey String   // path/key in object storage (S3-compatible)
+  mimeType   String?
+  sizeBytes  Int?
+  version    Int      @default(1)
+  checksumSha256      String?  // used for duplicate-upload detection, scoped per client
+  status              DocumentStatus @default(ACTIVE)
+  deletedAt           DateTime?
+  supersededById      String?        @unique // the OLD row points forward to the NEW row that replaced it
+  supersededBy        Document?      @relation("DocumentVersionChain", fields: [supersededById], references: [id])
+  previousVersion     Document?      @relation("DocumentVersionChain")
+  sourceChannel       DocumentSourceChannel @default(STAFF_MANUAL_UPLOAD)
+  uploadedById        String?  // User.id — null for token-link uploads, which have no staff user
+  uploadedBy          User?    @relation(fields: [uploadedById], references: [id])
+  retentionExpiryDate DateTime? // uploadedAt + 8 years, a single sane default — see scripts/backfill-document-retention.mjs
+  uploadedAt DateTime @default(now())
+
+  // Explicit, staff-chosen link to the Task this document supports — set via
+  // the existing reclassify (PATCH) flow, never inferred from filename or
+  // auto-attached on upload. Many documents can support one task (e.g. every
+  // bank statement page for a reconciliation), so the FK lives here, same
+  // shape as Document.clientId.
+  taskId      String?
+  task        Task?    @relation(fields: [taskId], references: [id])
+
+  requestItem DocumentRequestItem?
+  reconciliationRunsAsSourceA ReconciliationRun[] @relation("ReconciliationSourceA")
+  reconciliationRunsAsSourceB ReconciliationRun[] @relation("ReconciliationSourceB")
+
+  @@index([taskId])
+}
+
+// ---------- Client Portal ----------
+// Passwordless login for clients: they enter their email, get a short-lived
+// single-use link, and clicking it opens a session scoped to whichever
+// Client(s) have a ContactPerson row with that email. See src/lib/clientPortalAuth.ts.
+
+model ClientPortalMagicLink {
+  id        String    @id @default(cuid())
+  email     String
+  token     String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+}
+
+// ---------- GST Reconciliation ----------
+// Manual upload-and-compare tool: CA uploads their GSTR-2B export (CSV) and
+// their own purchase register (CSV), we match rows by GSTIN + invoice number
+// and flag mismatches. No GST portal API integration — see README.
+
+enum GstReconStatus {
+  MATCHED
+  ONLY_IN_2B
+  ONLY_IN_BOOKS
+  MISMATCH
+}
+
+model GstReconciliation {
+  id          String   @id @default(cuid())
+  clientId    String
+  client      Client   @relation(fields: [clientId], references: [id])
+  period      String   // e.g. "2026-06" — the return period the GSTR-2B covers
+  createdById String?
+  createdBy   User?    @relation(fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+
+  matchedCount     Int @default(0)
+  onlyIn2bCount    Int @default(0)
+  onlyInBooksCount Int @default(0)
+  mismatchCount    Int @default(0)
+
+  items GstReconciliationItem[]
+}
+
+model GstReconciliationItem {
+  id                String             @id @default(cuid())
+  reconciliationId  String
+  reconciliation    GstReconciliation  @relation(fields: [reconciliationId], references: [id])
+  supplierGstin     String?
+  invoiceNumber     String
+  invoiceDate       DateTime?
+  taxableValue2b    Float?
+  taxableValueBooks Float?
+  taxAmount2b       Float?
+  taxAmountBooks    Float?
+  status            GstReconStatus
+}
+
+// ---------- Reconciliation Exception Engine ----------
+// General-purpose reconciliation pipeline (GSTR-2B/1 vs books, bank vs
+// books) — deliberately separate from GstReconciliation above, which stays
+// as the simpler existing tool. This engine normalizes both sides into
+// ExtractedLineItem rows, matches them deterministically (no embeddings —
+// see src/lib/reconciliation/match.ts), and turns unresolved mismatches
+// above a materiality threshold into tasks. It only reads client data and
+// writes to its own tables + creates tasks — it never writes to the
+// client's books/ledger. See src/lib/reconciliation/ for the pipeline.
+
+enum ReconciliationType {
+  GST_2B_VS_PURCHASE
+  GST_1_VS_SALES
+  BANK_VS_BOOKS
+}
+
+enum ReconciliationRunStatus {
+  UPLOADED
+  EXTRACTING
+  EXTRACTED
+  MATCHING
+  MATCHED
+  REVIEWED
+  CLOSED
+  FAILED
+}
+
+enum LineItemSource {
+  A
+  B
+}
+
+enum ExtractionMethod {
+  JSON_PARSE
+  CSV_PARSE
+  EXCEL_PARSE
+  PDF_OCR
+}
+
+enum ReconciliationMatchType {
+  EXACT
+  FUZZY
+  MANUAL
+}
+
+enum ReconciliationMatchStatus {
+  MATCHED
+  EXCEPTION
+  RESOLVED
+  IGNORED
+}
+
+enum ReconciliationExceptionReason {
+  MISSING_IN_BOOKS
+  MISSING_IN_SOURCE // generalized "missing_in_2b" — also covers "missing on bank statement"
+  AMOUNT_MISMATCH
+  DATE_MISMATCH
+  GSTIN_MISMATCH
+  DUPLICATE
+  RATE_MISMATCH
+}
+
+model ReconciliationRun {
+  id                String                  @id @default(cuid())
+  firmId            String
+  firm              Firm                    @relation(fields: [firmId], references: [id])
+  clientId          String
+  client            Client                  @relation(fields: [clientId], references: [id])
+  type              ReconciliationType
+  periodStart       DateTime
+  periodEnd         DateTime
+  sourceADocumentId String?
+  sourceADocument   Document?               @relation("ReconciliationSourceA", fields: [sourceADocumentId], references: [id])
+  sourceBDocumentId String?
+  sourceBDocument   Document?               @relation("ReconciliationSourceB", fields: [sourceBDocumentId], references: [id])
+  status            ReconciliationRunStatus @default(UPLOADED)
+  matchedCount      Int                     @default(0)
+  exceptionCount    Int                     @default(0)
+  errorMessage      String? // set when status = FAILED
+  createdById       String?
+  createdBy         User?                   @relation(fields: [createdById], references: [id])
+  createdAt         DateTime                @default(now())
+  updatedAt         DateTime                @updatedAt
+
+  lineItems ExtractedLineItem[]
+  matches   ReconciliationMatch[]
+
+  // Idempotency guard (spec section 9): re-uploading the exact same pair of
+  // files for the same client/type/period returns the existing run instead
+  // of re-extracting — see checksum fields on Document (sourceA/BDocument).
+  @@index([firmId, clientId])
+}
+
+model ExtractedLineItem {
+  id                  String            @id @default(cuid())
+  reconciliationRunId String
+  reconciliationRun   ReconciliationRun @relation(fields: [reconciliationRunId], references: [id])
+  source              LineItemSource
+  rawRow              Json // the original row, for audit/debug
+  normalizedKey       String // computed match key
+  date                DateTime?
+  amount              Float?
+  taxAmount           Float?
+  counterparty        String?
+  referenceNo         String?
+  gstin               String?
+  confidenceScore     Int               @default(100) // 0-100, from extraction — low if OCR/parsing was uncertain
+  extractionMethod    ExtractionMethod
+  createdAt           DateTime          @default(now())
+
+  matchesAsA ReconciliationMatch[] @relation("MatchLineItemA")
+  matchesAsB ReconciliationMatch[] @relation("MatchLineItemB")
+
+  @@index([reconciliationRunId, normalizedKey])
+}
+
+model ReconciliationMatch {
+  id                   String                         @id @default(cuid())
+  reconciliationRunId  String
+  reconciliationRun    ReconciliationRun              @relation(fields: [reconciliationRunId], references: [id])
+  lineItemAId          String?
+  lineItemA            ExtractedLineItem?             @relation("MatchLineItemA", fields: [lineItemAId], references: [id])
+  lineItemBId          String?
+  lineItemB            ExtractedLineItem?             @relation("MatchLineItemB", fields: [lineItemBId], references: [id])
+  matchType            ReconciliationMatchType
+  matchConfidence      Int // 0-100
+  status               ReconciliationMatchStatus      @default(MATCHED)
+  exceptionReason      ReconciliationExceptionReason?
+  exceptionExplanation String? // plain-language, template-generated — see src/lib/reconciliation/explain.ts
+  materialityAmount    Float                          @default(0)
+  riskScore            Int                            @default(0) // 0-100 — see src/lib/reconciliation/risk.ts
+  taskId               String?
+  task                 Task?                          @relation(fields: [taskId], references: [id])
+  resolvedById         String?
+  resolvedBy           User?                          @relation(fields: [resolvedById], references: [id])
+  resolvedAt           DateTime?
+  resolutionNote       String?
+  createdAt            DateTime                       @default(now())
+  updatedAt            DateTime                       @updatedAt
+
+  @@index([reconciliationRunId, status])
+  @@index([reconciliationRunId, riskScore])
+}
+
+// Remembers, per client + source type (e.g. "purchase_register",
+// "bank_ledger"), which of their spreadsheet's column headers map to which
+// normalized field — confirmed once by staff, then reused on every future
+// upload from that client so they're never asked to re-map a file they
+// export from the same accounting software every month.
+model ReconciliationColumnMapping {
+  id         String   @id @default(cuid())
+  clientId   String
+  client     Client   @relation(fields: [clientId], references: [id])
+  sourceType String // "purchase_register" | "sales_register" | "bank_ledger" | "gstr2b" | "gstr1"
+  mapping    Json // { targetField: "detected column header" }
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([clientId, sourceType])
+}
+
+// ---------- Document Requests (WhatsApp collection) ----------
+// CA requests specific documents from a client; Artha sends a WhatsApp
+// message with a secure, token-based upload link. No login required for the
+// client — the unguessable token is the only access control on that link.
+
+enum DocumentRequestStatus {
+  PENDING
+  PARTIAL
+  COMPLETE
+  EXPIRED
+}
+
+model DocumentRequest {
+  id          String   @id @default(cuid())
+  firmId      String
+  firm        Firm     @relation(fields: [firmId], references: [id])
+  clientId    String
+  client      Client   @relation(fields: [clientId], references: [id])
+  token       String   @unique
+  note        String?
+  status      DocumentRequestStatus @default(PENDING)
+  expiresAt   DateTime?
+  createdById String?
+  createdBy   User?    @relation(fields: [createdById], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // Explicit, staff-chosen link to the Task this request supports — same
+  // shape and same reasoning as Document.taskId (see that field's comment).
+  // clientId above is never nullable on this model, so unlike Document there
+  // is no "no client to check" case: a linked Task must always match this
+  // request's own clientId.
+  taskId      String?
+  task        Task?    @relation(fields: [taskId], references: [id])
+
+  items DocumentRequestItem[]
+
+  @@index([taskId])
+}
+
+model DocumentRequestItem {
+  id         String           @id @default(cuid())
+  requestId  String
+  request    DocumentRequest  @relation(fields: [requestId], references: [id])
+  label      String           // e.g. "Bank Statement — March 2026"
+  fulfilled  Boolean          @default(false)
+  documentId String?          @unique
+  document   Document?        @relation(fields: [documentId], references: [id])
+}
+
+// ---------- Client Invoicing ----------
+// Professional-fee invoices the firm raises against its own clients — distinct
+// from Plan/Subscription, which is the firm's SaaS billing to Artha itself.
+// GST calculation is a simplification (18% professional-services rate,
+// CGST+SGST if firm and client share a GSTIN state code else IGST) meant to
+// cover the common case; firms can override the suggested split per invoice.
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+model Invoice {
+  id            String        @id @default(cuid())
+  firmId        String
+  firm          Firm          @relation(fields: [firmId], references: [id])
+  clientId      String
+  client        Client        @relation(fields: [clientId], references: [id])
+  invoiceNumber String        // e.g. "INV/2026-27/0001" — unique per firm, sequenced per Indian financial year
+  publicToken   String?       @unique // unguessable token for the read-only public share link (email/WhatsApp)
+  status        InvoiceStatus @default(DRAFT)
+  issueDate     DateTime      @default(now())
+  dueDate       DateTime?
+  paymentTerms  String?       // e.g. "Due within 7 days" — free text shown on the invoice
+  discountType  String?       // "PERCENT" | "FLAT" — applied to subtotal before GST
+  discountValue Float         @default(0)
+  discountAmount Float        @default(0)
+  applyGst      Boolean       @default(false)
+  gstType       String?       // "INTRA" (CGST+SGST) | "INTER" (IGST)
+  gstRate       Float         @default(18)
+  subtotal      Float
+  taxAmount     Float         @default(0)
+  total         Float
+  notes         String?
+  paidAt        DateTime?
+  paymentRef    String?
+  emailedAt     DateTime?
+  whatsappSentAt DateTime?
+  lastReminderSentAt DateTime? // dedupes client due/overdue payment reminders across cron runs
+  razorpayPaymentLinkId  String? // Razorpay Payment Link id, created via the firm's own connected Razorpay account
+  razorpayPaymentLinkUrl String? // short URL shown as "Pay Now" — client pays by card/UPI/netbanking, settles to the firm's account
+  createdById   String?
+  createdBy     User?         @relation(fields: [createdById], references: [id])
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  items InvoiceItem[]
+
+  // Quotation -> Invoice provenance (P1 batch) — set only when this invoice
+  // was created via the "Create Invoice" action on an accepted Quotation;
+  // null for every ordinary manually-created invoice. @unique is the
+  // idempotency guarantee itself (see POST /api/quotations/[id]/create-invoice)
+  // — at most one Invoice may ever point at a given Quotation.
+  sourceQuotationId String?    @unique
+  sourceQuotation   Quotation? @relation(fields: [sourceQuotationId], references: [id])
+
+  @@unique([firmId, invoiceNumber])
+}
+
+model InvoiceItem {
+  id          String  @id @default(cuid())
+  invoiceId   String
+  invoice     Invoice @relation(fields: [invoiceId], references: [id])
+  description String
+  quantity    Float   @default(1)
+  rate        Float
+  amount      Float   // quantity * rate, stored to avoid recompute drift
+}
+
+// ---------- Client Quotations / Proposals ----------
+// Pre-engagement service proposals (Incorporation, Virtual CFO, GST, Audit,
+// TDS, etc.) — distinct from Invoice, which bills for work already
+// underway. Structured content (scope pillars, fee rows, terms, about
+// points) is stored as JSON since each block is display-only within its
+// parent document and never queried/filtered independently — same
+// convention as TaskTemplate.checklist elsewhere in this schema.
+
+enum QuotationStatus {
+  DRAFT
+  SENT
+  ACCEPTED
+  DECLINED
+  EXPIRED
+}
+
+model Quotation {
+  id              String          @id @default(cuid())
+  firmId          String
+  firm            Firm            @relation(fields: [firmId], references: [id])
+  clientId        String?         // null when proposing to a prospect not yet onboarded as a Client
+  client          Client?         @relation(fields: [clientId], references: [id])
+  prospectName    String?
+  prospectEmail   String?
+  prospectPhone   String?
+  quotationNumber String          // e.g. "QUO/2026-27/0001" — unique per firm, sequenced per Indian financial year
+  publicToken     String?         @unique
+  status          QuotationStatus @default(DRAFT)
+  serviceType     String          // preset used at creation (INCORPORATION | VIRTUAL_CFO | GST | AUDIT | TDS | OTHER) — freely editable after
+  title           String
+  subtitle        String?
+  preparedByName  String?
+  introNote       String?
+  statHighlights  Json            // [{ label, value }] — "firm at a glance" stat cards
+  aboutPoints     Json            // [{ title, description }] — "why choose us" grid
+  scopeItems      Json            // [{ title, description }] — scope-of-service pillars
+  feeItems        Json            // [{ particulars, fee, frequency }]
+  termsItems      Json            // [{ label, description }]
+  issueDate       DateTime        @default(now())
+  validUntil      DateTime?
+  createdById     String?
+  createdBy       User?           @relation(fields: [createdById], references: [id])
+  emailedAt       DateTime?
+  whatsappSentAt  DateTime?
+  acceptedAt      DateTime?
+  acceptedByName  String?
+  acceptedIp      String?
+  declinedAt      DateTime?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  // Inverse side of Invoice.sourceQuotationId — the one Invoice (if any)
+  // created from this Quotation via "Create Invoice". Never set any other way.
+  createdInvoice  Invoice?
+
+  @@unique([firmId, quotationNumber])
+}
+
+// ---------- Audit Log ----------
+// Who did what, when — for sensitive actions (credential reveals, client
+// deletion, staff role changes, invoice status changes). Append-only.
+
+// Typed sibling of the free-text `targetType` string below — added so a future
+// "audit history for this client/invoice/..." query can filter on a real enum
+// instead of a string match, without committing to a full polymorphic-relation
+// refactor yet (that's a bigger job: it would need one nullable relation field
+// per target model, or a union view). New call sites should set this alongside
+// `targetType`; existing rows and the 19 call sites in src/app/api/**/route.ts
+// that predate this field are NOT backfilled — targetEntityType is null on them.
+enum AuditTargetType {
+  Client
+  User
+  Invoice
+  Quotation
+  Document
+  Credential
+  ReconciliationRun
+  ReconciliationMatch
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  firmId     String
+  firm       Firm     @relation(fields: [firmId], references: [id])
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id])
+  action     String   // e.g. "credential.reveal", "client.delete", "staff.role_change"
+  targetType String?  // e.g. "Credential", "Client", "User", "Invoice" — free text, kept as-is
+  targetEntityType AuditTargetType? // typed sibling of targetType — see comment above
+  targetId   String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+}
+
+// ---------- Universal Firm Memory: Activity Engine ----------
+// Business-context history ("GST task moved from Waiting for Client to
+// Partner Review") — deliberately separate from AuditLog above, which stays
+// the technical/security record ("User updated Task row"). Both are
+// append-only and both exist; this is not a replacement for AuditLog, and
+// AuditLog's call sites are untouched. See src/lib/activity.ts for the single
+// service (recordActivity) that writes here — nothing else should insert
+// directly into this table, and there is no update/delete API for it: rows
+// are immutable by omission (no PATCH/DELETE route exists), not by a DB
+// constraint, matching how AuditLog is already treated in this codebase.
+//
+// entityType/entityId is a polymorphic reference (no per-entity foreign key
+// column) since this table is cross-module infrastructure spanning nine
+// unrelated entities — see src/lib/activity.ts's comment for why ownership
+// is still enforced (at the service layer, from an already firm-scoped
+// caller) despite entityId not being a DB-level foreign key.
+enum ActivityEntityType {
+  CLIENT
+  STAFF
+  TASK
+  LEAD
+  DOCUMENT
+  INVOICE
+  QUOTATION
+  RECONCILIATION
+  FIRM
+}
+
+enum ActivityActorType {
+  USER
+  SYSTEM
+  AI // future-facing only — nothing in this codebase sets this yet
+}
+
+model Activity {
+  id          String             @id @default(cuid())
+  firmId      String
+  firm        Firm               @relation(fields: [firmId], references: [id])
+  entityType  ActivityEntityType
+  entityId    String
+  actorType   ActivityActorType
+  actorId     String?
+  actor       User?              @relation(fields: [actorId], references: [id])
+  // Free text, not a Prisma enum — mirrors AuditLog.action above. A fixed
+  // vocabulary lives in src/lib/activity.ts (ActivityEvent) for compile-time
+  // safety at call sites; keeping the column a String means adding a new
+  // event type later is a code change, not a migration.
+  eventType   String
+  title       String
+  description String?
+  metadata    Json?
+  createdAt   DateTime           @default(now())
+
+  @@index([firmId, entityType, entityId, createdAt])
+  @@index([firmId, createdAt])
+  @@index([eventType, createdAt])
+}
+
+// ---------- Staff: Attendance & Leave ----------
+
+model AttendanceLog {
+  id       String    @id @default(cuid())
+  userId   String
+  user     User      @relation(fields: [userId], references: [id])
+  checkIn  DateTime
+  checkOut DateTime?
+  ipAddress String?
+}
+
+enum LeaveStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model LeaveRequest {
+  id        String      @id @default(cuid())
+  userId    String
+  user      User        @relation(fields: [userId], references: [id])
+  fromDate  DateTime
+  toDate    DateTime
+  reason    String?
+  status    LeaveStatus @default(PENDING)
+  createdAt DateTime    @default(now())
+}
+
+// ---------- Billing ----------
+
+model Plan {
+  id            String   @id @default(cuid())
+  name          String   @unique // Solo, Starter, Growth, Scale, Enterprise
+  priceAnnualInr Int
+  maxUsers      Int
+  storageGb     Int
+  firms         Firm[]
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+}
+
+model Subscription {
+  id                 String             @id @default(cuid())
+  firmId             String             @unique
+  firm               Firm               @relation(fields: [firmId], references: [id])
+  status             SubscriptionStatus @default(TRIALING)
+  trialEndsAt        DateTime?
+  currentPeriodEnd   DateTime?
+  razorpaySubId      String?
+  createdAt          DateTime           @default(now())
+  updatedAt          DateTime           @updatedAt
+}
+
+// ---------- Notifications log ----------
+
+enum NotificationChannel {
+  WHATSAPP
+  EMAIL
+}
+
+enum NotificationStatus {
+  QUEUED
+  SENT
+  FAILED
+}
+
+model NotificationLog {
+  id        String              @id @default(cuid())
+  firmId    String?
+  channel   NotificationChannel
+  toAddress String              // phone or email
+  template  String
+  payload   Json?
+  status    NotificationStatus  @default(QUEUED)
+  error     String?
+  // Both nullable and independent — not every notification is about a client
+  // (e.g. internal staff alerts) or triggered by a task (e.g. invoice
+  // reminders). Populate whichever applies at the call site; see
+  // src/lib/email.ts / src/lib/whatsapp.ts.
+  clientId     String?
+  client       Client?  @relation(fields: [clientId], references: [id])
+  sourceTaskId String?
+  sourceTask   Task?    @relation(fields: [sourceTaskId], references: [id])
+  createdAt DateTime            @default(now())
+  sentAt    DateTime?
+}
